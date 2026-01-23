@@ -5,6 +5,13 @@
  * Provides MCP tools for searching npm packages using the `npm search` command.
  * Supports both stdio and HTTP (streamable-http) transport modes.
  *
+ * Features:
+ * - Search npm packages via command-line interface
+ * - Supports both stdio and HTTP transport modes
+ * - Structured logging with Pino
+ * - Graceful shutdown handling
+ * - Health check endpoint
+ *
  * HTTP mode is automatically enabled when the PORT environment variable is set.
  */
 
@@ -22,6 +29,7 @@ import { randomUUID } from 'node:crypto';
 import util from 'util';
 import express, { type Request, type Response as ExpressResponse } from 'express';
 import * as z from 'zod';
+import { logger } from './src/utils/logger.js';
 
 const execPromise = util.promisify(exec);
 
@@ -72,28 +80,40 @@ function getSessionId(
 }
 
 /**
- * Sends a JSON-RPC error response
+ * Sends a JSON-RPC error response.
+ * Prevents sending response if headers have already been sent.
+ *
+ * @param res - Express response object
+ * @param statusCode - HTTP status code
+ * @param errorCode - JSON-RPC error code
+ * @param message - Error message
+ * @param id - Optional request ID for correlation
  */
 function sendErrorResponse(
   res: ExpressResponse,
   statusCode: number,
   errorCode: number,
-  message: string
+  message: string,
+  id: unknown = null
 ): void {
+  if (res.headersSent) {
+    return;
+  }
   res.status(statusCode).json({
     jsonrpc: '2.0',
     error: {
       code: errorCode,
       message,
     },
-    id: null,
+    id,
   });
 }
 
 /**
- * MCP Server for npm package search
+ * MCP Server for npm package search.
  *
  * Provides tools for searching npm packages using the `npm search` command.
+ * Supports both stdio and HTTP (streamable-http) transport modes.
  */
 class NpmSearchServer {
   private server: Server;
@@ -116,10 +136,11 @@ class NpmSearchServer {
   }
 
   /**
-   * Sets up error handling for the MCP server
+   * Sets up error handling for the MCP server.
+   * Configures error handlers for the MCP server and process signals.
    */
   private setupErrorHandling(): void {
-    this.server.onerror = (error) => console.error('[MCP Error]', error);
+    this.server.onerror = (error) => logger.error({ error }, 'MCP Error');
     process.on('SIGINT', async () => {
       await this.server.close();
       process.exit(0);
@@ -207,16 +228,19 @@ class NpmSearchServer {
   }
 
   /**
-   * Runs the server with stdio transport (default mode)
+   * Runs the server with stdio transport (default mode).
+   * Connects the server to stdio transport and logs startup message.
    */
   async runStdio(): Promise<void> {
     const transport = new StdioServerTransport();
     await this.server.connect(transport);
-    console.error('Npm Search MCP server running on stdio');
+    logger.info('Npm Search MCP server running on stdio');
   }
 
   /**
-   * Gets the underlying MCP server instance
+   * Gets the underlying MCP server instance.
+   *
+   * @returns The MCP server instance
    */
   getServer(): Server {
     return this.server;
@@ -225,27 +249,92 @@ class NpmSearchServer {
 
 /**
  * Sets up HTTP transport with Express server
- * 
+ *
+ * Configures all standard MCP endpoints:
+ * - GET /health - Health check endpoint
+ * - GET /mcp - SSE stream endpoint (returns 404 for stateless servers)
+ * - DELETE /mcp - Session termination endpoint
+ * - POST /mcp - Main MCP endpoint for requests
+ *
  * @param server - The NpmSearchServer instance (unused but kept for API consistency)
  * @param port - The port number to listen on
  */
 function setupHttpTransport(_server: NpmSearchServer, port: number): void {
   const app = express();
   app.use(express.json({ limit: '10mb' }));
+  app.disable('x-powered-by');
 
   // Health check endpoint for Docker healthchecks
   app.get('/health', (_req: Request, res: ExpressResponse) => {
     res.json({
       status: 'ok',
       service: 'mcp-npm-search',
+      version: '0.1.1',
       activeSessions: transports.size,
     });
   });
 
-  // Main MCP endpoint - handles both new session initialization and existing session requests
+  // SSE stream endpoint (GET /mcp)
+  // According to MCP specification, StreamableHTTPServerTransport.handleRequest
+  // can handle both POST and GET requests, automatically processing SSE streams
+  // when Accept: text/event-stream header is present.
+  app.get('/mcp', async (req: Request, res: ExpressResponse) => {
+    const sessionId = getSessionId(req.headers);
+
+    if (!sessionId) {
+      sendErrorResponse(res, 400, -32000, 'Bad Request: No session ID provided');
+      return;
+    }
+
+    const transport = transports.get(sessionId);
+    if (!transport) {
+      sendErrorResponse(res, 404, -32000, 'Session not found');
+      return;
+    }
+
+    try {
+      // transport.handleRequest automatically handles GET with Accept: text/event-stream
+      // It will set appropriate SSE headers and stream responses
+      await transport.handleRequest(req, res, null);
+    } catch (error) {
+      logger.error(
+        { error: error instanceof Error ? error.message : String(error), sessionId },
+        'Error handling SSE stream request',
+      );
+      sendErrorResponse(res, 500, -32603, 'Internal server error');
+    }
+  });
+
+  // Session termination endpoint (DELETE /mcp)
+  app.delete('/mcp', async (req: Request, res: ExpressResponse) => {
+    const sessionId = getSessionId(req.headers);
+
+    if (!sessionId) {
+      sendErrorResponse(res, 400, -32000, 'Bad Request: No session ID provided');
+      return;
+    }
+
+    const transport = transports.get(sessionId);
+    if (!transport) {
+      sendErrorResponse(res, 404, -32000, 'Session not found');
+      return;
+    }
+
+    try {
+      await transport.handleRequest(req, res, req.body);
+      transports.delete(sessionId);
+      logger.info({ sessionId, totalSessions: transports.size }, 'Session deleted');
+    } catch (error) {
+      logger.error({ error: error instanceof Error ? error.message : String(error), sessionId }, 'Error handling session termination');
+      sendErrorResponse(res, 500, -32603, 'Error handling session termination');
+    }
+  });
+
+  // Main MCP endpoint (POST /mcp)
   app.post('/mcp', async (req: Request, res: ExpressResponse) => {
     try {
       const sessionId = getSessionId(req.headers);
+      const requestId = typeof req.body === 'object' && req.body !== null && 'id' in req.body ? req.body.id : null;
 
       // Handle existing session
       if (sessionId) {
@@ -254,7 +343,7 @@ function setupHttpTransport(_server: NpmSearchServer, port: number): void {
           await transport.handleRequest(req, res, req.body);
           return;
         }
-        sendErrorResponse(res, 404, -32000, 'Session not found');
+        sendErrorResponse(res, 404, -32000, 'Session not found', requestId);
         return;
       }
 
@@ -266,7 +355,7 @@ function setupHttpTransport(_server: NpmSearchServer, port: number): void {
         req.body.method === 'initialize';
 
       if (!isInitialize) {
-        sendErrorResponse(res, 400, -32000, 'Bad Request: No session ID provided');
+        sendErrorResponse(res, 400, -32000, 'Bad Request: No session ID provided', requestId);
         return;
       }
 
@@ -276,7 +365,7 @@ function setupHttpTransport(_server: NpmSearchServer, port: number): void {
         sessionIdGenerator: () => randomUUID(),
         enableJsonResponse: true,
         onsessioninitialized: (sessionId: string) => {
-          console.log(`Session initialized: ${sessionId}`);
+          logger.info({ sessionId, totalSessions: transports.size + 1 }, 'Session initialized');
           transports.set(sessionId, transport);
         },
       });
@@ -284,7 +373,7 @@ function setupHttpTransport(_server: NpmSearchServer, port: number): void {
       newServer.getServer().onclose = async () => {
         const sid = transport.sessionId;
         if (sid && transports.has(sid)) {
-          console.log(`Session closed: ${sid}`);
+          logger.info({ sessionId: sid, totalSessions: transports.size - 1 }, 'Session closed');
           transports.delete(sid);
         }
       };
@@ -293,16 +382,33 @@ function setupHttpTransport(_server: NpmSearchServer, port: number): void {
       await transport.handleRequest(req, res, req.body);
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
-      console.error('Error handling MCP request:', errorMessage);
-      if (!res.headersSent) {
-        sendErrorResponse(res, 500, -32603, 'Internal server error');
-      }
+      logger.error({ error: errorMessage }, 'Error handling MCP request');
+      const requestId = typeof req.body === 'object' && req.body !== null && 'id' in req.body ? req.body.id : null;
+      sendErrorResponse(res, 500, -32603, 'Internal server error', requestId);
     }
   });
 
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`Npm Search MCP server running on port ${port}`);
+  const server = app.listen(port, '0.0.0.0', () => {
+    logger.info({ port }, 'Npm Search MCP server started');
   });
+
+  // Graceful shutdown handler
+  const shutdown = async () => {
+    logger.info('Shutting down...');
+    for (const [sessionId, transport] of transports.entries()) {
+      try {
+        await transport.close();
+      } catch (error) {
+        logger.error({ error: error instanceof Error ? error.message : String(error), sessionId }, 'Error closing transport');
+      }
+    }
+    transports.clear();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 /**
@@ -320,4 +426,7 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch(console.error);
+main().catch((error) => {
+  logger.error({ error }, 'Fatal error');
+  process.exit(1);
+});

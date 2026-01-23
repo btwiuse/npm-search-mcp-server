@@ -9,6 +9,10 @@ A Model Context Protocol server that allows you to search for npm packages by ca
 - Search npm packages using the `npm search` command
 - Supports both stdio and HTTP (streamable-http) transport modes
 - HTTP mode automatically enabled when `PORT` environment variable is set
+- Structured logging with Pino
+- Graceful shutdown handling
+- Health check endpoint (`/health`)
+- Session management for HTTP transport
 
 <a href="https://glama.ai/mcp/servers/yeb3luefvf"><img width="380" height="200" src="https://glama.ai/mcp/servers/yeb3luefvf/badge" alt="npm-search-mcp-server MCP server" /></a>
 
@@ -175,8 +179,10 @@ docker run -p 3009:3009 -e PORT=3009 mcp/npm-search
 ```
 
 The Docker image uses HTTP transport when the `PORT` environment variable is set. The server exposes:
-- `/mcp` - Main MCP endpoint (POST)
-- `/health` - Health check endpoint (GET)
+- `POST /mcp` - Main MCP endpoint for tool calls and session initialization
+- `GET /mcp` - SSE stream endpoint for streaming responses (requires session ID)
+- `DELETE /mcp` - Session termination endpoint
+- `GET /health` - Health check endpoint with service status and active session count
 
 For Docker Compose integration:
 
