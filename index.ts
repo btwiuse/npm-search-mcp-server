@@ -127,10 +127,21 @@ class NpmSearchServer {
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      if (request.params.name !== 'search_npm_packages') {
+      // Extract tool name (LibreChat may send toolName_mcp_serverName or toolName_mcp-serverName)
+      // We need to extract just the tool name before any _mcp or -mcp delimiter
+      const requestedToolName = request.params.name;
+      let toolName = requestedToolName;
+      
+      // Handle various delimiter patterns: _mcp_, _mcp-, -mcp-, etc.
+      const mcpDelimiterPattern = /[_-]mcp[_-]/i;
+      if (mcpDelimiterPattern.test(requestedToolName)) {
+        toolName = requestedToolName.split(mcpDelimiterPattern)[0];
+      }
+
+      if (toolName !== 'search_npm_packages') {
         throw new McpError(
           ErrorCode.MethodNotFound,
-          `Unknown tool: ${request.params.name}`
+          `Unknown tool: ${requestedToolName} (extracted: ${toolName})`
         );
       }
 
