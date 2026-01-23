@@ -39,6 +39,29 @@ const SearchArgsSchema = z.object({
 });
 
 /**
+ * Extracts the actual tool name from a potentially prefixed tool name.
+ * 
+ * LibreChat may send tool names in the format `toolName_mcp_serverName` or `toolName-mcp-serverName`
+ * to distinguish tools from different MCP servers. This function extracts just the tool name.
+ * 
+ * @param toolName - The tool name as received (may include server suffix)
+ * @returns The extracted tool name without any server suffix
+ * 
+ * @example
+ * extractToolName('search_npm_packages_mcp_npm-search') // 'search_npm_packages'
+ * extractToolName('search_npm_packages-mcp-server') // 'search_npm_packages'
+ * extractToolName('search_npm_packages') // 'search_npm_packages'
+ */
+function extractToolName(toolName: string): string {
+  // Match any occurrence of _mcp or -mcp (case-insensitive) and extract everything before it
+  const mcpDelimiterPattern = /[_-]mcp/i;
+  const match = toolName.match(mcpDelimiterPattern);
+  return match && match.index !== undefined
+    ? toolName.substring(0, match.index)
+    : toolName;
+}
+
+/**
  * Extracts MCP session ID from HTTP request headers
  */
 function getSessionId(
@@ -127,16 +150,8 @@ class NpmSearchServer {
     }));
 
     this.server.setRequestHandler(CallToolRequestSchema, async (request) => {
-      // Extract tool name (LibreChat may send toolName_mcp_serverName or toolName_mcp-serverName)
-      // We need to extract just the tool name before any _mcp or -mcp delimiter
       const requestedToolName = request.params.name;
-      let toolName = requestedToolName;
-      
-      // Handle various delimiter patterns: _mcp_, _mcp-, -mcp-, etc.
-      const mcpDelimiterPattern = /[_-]mcp[_-]/i;
-      if (mcpDelimiterPattern.test(requestedToolName)) {
-        toolName = requestedToolName.split(mcpDelimiterPattern)[0];
-      }
+      const toolName = extractToolName(requestedToolName);
 
       if (toolName !== 'search_npm_packages') {
         throw new McpError(
@@ -179,12 +194,12 @@ class NpmSearchServer {
           ],
         };
       } catch (error) {
-        // Re-throw MCP errors as-is
+        // Re-throw MCP errors as-is to preserve error context
         if (error instanceof McpError) {
           throw error;
         }
         
-        // Convert other errors to MCP errors
+        // Convert other errors to MCP errors with appropriate error code
         const message = error instanceof Error ? error.message : 'Unexpected error occurred';
         throw new McpError(ErrorCode.InternalError, message);
       }
