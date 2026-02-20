@@ -20,7 +20,7 @@
     "watch": "tsc --watch"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.25.3",
+    "@modelcontextprotocol/sdk": "1.26.0",
     "express": "^5.2.1",
     "pino": "^10.3.0",
     "zod": "^4.3.6"
