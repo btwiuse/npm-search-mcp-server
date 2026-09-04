@@ -1,7 +1,7 @@
 [![MseeP.ai Security Assessment Badge](https://mseep.net/pr/btwiuse-npm-search-mcp-server-badge.png)](https://mseep.ai/app/btwiuse-npm-search-mcp-server)
 
 # npm-search MCP Server
-[![smithery badge](https://smithery.ai/badge/npm-search-mcp-server)](https://smithery.ai/server/npm-search-mcp-server)
+[![LightNow capabilities](https://lightnow.ai/badge/io.github.btwiuse/npm-search-mcp-server)](https://lightnow.ai/servers/io.github.btwiuse/npm-search-mcp-server)
 
 A Model Context Protocol server that allows you to search for npm packages by calling the `npm search` command.
 
